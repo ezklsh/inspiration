@@ -1,0 +1,12 @@
+# local-only tooling — never pushed to GitHub Pages
+tools/upload.html
+
+# python
+__pycache__/
+*.pyc
+
+# os
+.DS_Store
+
+# docs
+.dev/
