@@ -1,0 +1,244 @@
+/* ============================================
+   inspiration — minimal moodboard gallery
+   ============================================ */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+:root {
+    --bg: #ffffff;
+    --fg: #000000;
+    --border: #000000;
+    --columns: 4;
+}
+
+body {
+    font-family: courier, "courier new", serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.6;
+    transition: background 0.2s, color 0.2s;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+}
+
+body.dark-mode {
+    --bg: #000000;
+    --fg: #ffffff;
+    --border: #ffffff;
+}
+
+/* ============ Header ============ */
+
+header {
+    height: 50px;
+    padding: 0px 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    /* border-bottom: 1px solid var(--border); */
+    background: var(--bg);
+}
+
+.site-title {
+    font-size: 12px;
+    text-transform: lowercase;
+    font-weight: 400;
+    text-decoration: none;
+    color: var(--fg);
+}
+
+.site-title:hover {
+    text-decoration: underline;
+}
+
+.header-controls button {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    color: var(--fg);
+    /* padding adjusted to zero */
+    padding: 0px 0px;
+}
+
+.header-controls button:hover {
+    text-decoration: underline;
+}
+
+/* ============ Masonry Grid ============ */
+
+main {
+    padding: 8px;
+    flex: 1 0 auto;   /* grow, don't shrink */
+}
+
+.masonry-grid {
+    column-count: var(--columns);
+    column-gap: 4px;
+}
+
+.grid-item {
+    break-inside: avoid;
+    margin-bottom: 4px;
+}
+
+.grid-item a {
+    display: block;
+    text-decoration: none;
+    color: inherit;
+}
+
+.grid-item img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+
+/* Grid size variations */
+.masonry-grid.small {
+    --columns: 6;
+}
+
+.masonry-grid.large {
+    --columns: 2;
+}
+
+@media (max-width: 1200px) {
+    .masonry-grid { --columns: 3; }
+    .masonry-grid.small { --columns: 4; }
+    .masonry-grid.large { --columns: 3; }
+}
+
+@media (max-width: 800px) {
+    .masonry-grid { --columns: 2; }
+    .masonry-grid.small { --columns: 3; }
+    .masonry-grid.large { --columns: 2; }
+}
+
+@media (max-width: 500px) {
+    .masonry-grid { --columns: 1; }
+    .masonry-grid.small { --columns: 2; }
+    .masonry-grid.large { --columns: 1; }
+}
+
+/* ============ Detail Page ============ */
+
+.detail-page {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 48px 16px;
+}
+
+.detail-page h1 {
+    font-size: 24px;
+    font-weight: 400;
+    margin-bottom: 24px;
+    text-transform: lowercase;
+    line-height: 1.3;
+}
+
+.detail-page .description {
+    font-size: 14px;
+    margin-bottom: 40px;
+    line-height: 1.8;
+}
+
+.detail-page .description a {
+    color: var(--fg);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.gallery img {
+    width: 100%;
+    height: auto;
+    display: block;
+    margin-bottom: 16px;
+}
+
+.related-section {
+    margin-top: 64px;
+}
+
+.related-section h3 {
+    font-size: 14px;
+    font-weight: 400;
+    margin-bottom: 16px;
+    text-transform: lowercase;
+}
+
+.related-grid {
+    column-count: 3;
+    column-gap: 4px;
+}
+
+.related-grid .grid-item {
+    margin-bottom: 4px;
+}
+
+@media (max-width: 800px) {
+    .related-grid { column-count: 2; }
+}
+
+@media (max-width: 500px) {
+    .related-grid { column-count: 1; }
+}
+
+/* ============ Footer ============ */
+
+footer {
+    padding: 0px 10px;
+    font-size: 12px;
+    /* border-top: 1px solid var(--border); */
+    margin-bottom: 10px;
+    flex-shrink: 0;
+}
+
+.footer-links {
+    display: flex;
+    gap: 24px;
+    margin-bottom: 16px;
+}
+
+.footer-links a {
+    color: var(--fg);
+    text-decoration: none;
+}
+
+.footer-links a:hover {
+    text-decoration: underline;
+}
+
+/* ============ Grid Controls ============ */
+
+.grid-controls {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    display: flex;
+    gap: 4px;
+    padding: 4px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+}
+
+.grid-controls button {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 14px;
+    color: var(--fg);
+    padding: 2px 10px;
+}
+
+.grid-controls button:hover {
+    background: var(--fg);
+    color: var(--bg);
+}
