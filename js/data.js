@@ -13,5 +13,13 @@ const POSTS = [
         cover: "assets/the-odyssey-1786890922.webp",
         gallery: ["assets/the-odyssey-1786890922.webp"],
         related: []
+    },
+    {
+        slug: "street-fighter",
+        title: "Street Fighter",
+        description: `Illustration by Edayan (Shinya Edaki)`,
+        cover: "assets/street-fighter-1790435757.jpg",
+        gallery: ["assets/street-fighter-1790435757.jpg"],
+        related: []
     }
 ];
