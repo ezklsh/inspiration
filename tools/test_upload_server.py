@@ -75,23 +75,35 @@ class TestParse(unittest.TestCase):
         self.assertEqual(b["related"], [])
 
     def test_parse_real_data_js(self):
+        # The content is the user's to change, so assert STRUCTURE only —
+        # never a specific post count or slug.
         with open(DATA_JS, encoding="utf-8") as f:
-            posts = srv.parse_posts(f.read())
-        self.assertGreaterEqual(len(posts), 3)
+            raw = f.read()
+        posts = srv.parse_posts(raw)
+        self.assertIsInstance(posts, list)
         for p in posts:
             self.assertTrue(p["slug"])
             self.assertTrue(p["title"])
             self.assertTrue(p["cover"].startswith("assets/"))
             self.assertIsInstance(p["gallery"], list)
             self.assertIsInstance(p["related"], list)
-        self.assertIn("the-odyssey", [p["slug"] for p in posts])
 
-    def test_real_data_description_keeps_quotes(self):
+    def test_real_data_rewrite_is_byte_identical(self):
         with open(DATA_JS, encoding="utf-8") as f:
-            posts = {p["slug"]: p for p in srv.parse_posts(f.read())}
-        ody = posts["the-odyssey"]
-        self.assertIn('"All the things you wanted', ody["description"])
-        self.assertIn("don't really want to go home", ody["description"])
+            raw = f.read()
+        self.assertEqual(srv.replace_array_body(raw, srv.block_texts(raw)), raw)
+
+    def test_real_data_survives_a_canonical_rewrite(self):
+        with open(DATA_JS, encoding="utf-8") as f:
+            raw = f.read()
+        posts = srv.parse_posts(raw)
+        rebuilt = ("const POSTS = [\n"
+                   + ",\n".join(srv.render_post_block(p) for p in posts)
+                   + "\n];\n")
+        self.assertEqual(srv.parse_posts(rebuilt), posts)
+        if HAS_NODE:
+            ok, detail = node_ok(rebuilt)
+            self.assertTrue(ok, detail)
 
 
 class TestMutations(unittest.TestCase):
@@ -254,26 +266,28 @@ class TestStashUndo(unittest.TestCase):
         shutil.copy(DATA_JS, data)
         original = open(data, encoding="utf-8").read()
 
-        img = os.path.join(self.assets, "the-odyssey.webp")
+        img = os.path.join(self.assets, "cover.webp")
         with open(img, "w") as f:
             f.write("img")
 
         content = srv.read_data_js(data)
-        idx = srv.post_index(content, "the-odyssey")
+        first = srv.parse_posts(content)[0]      # any post — content is the user's
+        slug = first["slug"]
+        idx = srv.post_index(content, slug)
         blocks = srv.block_texts(content)
         removed_block = blocks[idx]
         del blocks[idx]
         ok, detail = srv.write_data_js(srv.replace_array_body(content, blocks), data)
         self.assertTrue(ok, detail)
-        self.assertNotIn("the-odyssey",
+        self.assertNotIn(slug,
                          [p["slug"] for p in srv.parse_posts(srv.read_data_js(data))])
 
-        srv.stash_delete("the-odyssey", "The Odyssey", removed_block, idx, [img],
+        srv.stash_delete(slug, first["title"], removed_block, idx, [img],
                          trash_root=self.trash, guard_root=self.assets)
 
         rec, err = srv.undo_last_delete(trash_root=self.trash, data_path=data)
         self.assertEqual(err, "")
-        self.assertEqual(rec["slug"], "the-odyssey")
+        self.assertEqual(rec["slug"], slug)
         self.assertEqual(open(data, encoding="utf-8").read(), original)   # byte-identical
         self.assertTrue(os.path.isfile(img))                              # image back
         self.assertEqual(srv.load_undo_stack(self.trash), [])
