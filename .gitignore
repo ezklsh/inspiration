@@ -1,5 +1,9 @@
 # local-only tooling — never pushed to GitHub Pages
 tools/upload.html
+tools/manage.html
+
+# temp file written by atomic data.js writes (must keep a .js extension)
+js/data.js.tmp.js
 
 # python
 __pycache__/
@@ -8,5 +12,5 @@ __pycache__/
 # os
 .DS_Store
 
-# docs
+# docs (also holds .dev/trash, where deletes are stashed for undo)
 .dev/
