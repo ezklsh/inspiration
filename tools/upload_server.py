@@ -5,8 +5,13 @@ Serves the static site AND provides the upload tool.
 
   GET  /            → homepage
   GET  /upload      → upload page (tools/upload.html, gitignored)
+  GET  /manage      → manage posts page (tools/manage.html, gitignored)
+  GET  /api/posts   → list all posts as JSON (+ undo availability)
   POST /api/upload  → save image + post locally (assets/, js/data.js)
-  POST /api/push    → git add/commit/push the uploads
+  POST /api/edit    → update a post (title/description/related/slug)
+  POST /api/delete  → remove a post (stashes it for undo)
+  POST /api/undo    → restore the most recently deleted post
+  POST /api/push    → git add/commit/push; clears undo history
 
 Local-only: binds 127.0.0.1, never deployed. Run with:
 
@@ -523,10 +528,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
+        if path == "/api/posts":
+            self.api_posts()
+            return
         if path == "/":
             path = "/index.html"
         elif path == "/upload":
             self.serve_file("/tools/upload.html")
+            return
+        elif path == "/manage":
+            self.serve_file("/tools/manage.html")
             return
         self.serve_file(path)
 
@@ -536,6 +547,12 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         if path == "/api/upload":
             self.api_upload()
+        elif path == "/api/edit":
+            self.api_edit()
+        elif path == "/api/delete":
+            self.api_delete()
+        elif path == "/api/undo":
+            self.api_undo()
         elif path == "/api/push":
             self.api_push()
         else:
@@ -621,6 +638,171 @@ class Handler(BaseHTTPRequestHandler):
             "message": f"saved '{title}' — view locally or push to repo",
         })
 
+    # -- /api/posts --
+
+    def api_posts(self):
+        try:
+            posts = parse_posts(read_data_js())
+        except ParseError as e:
+            self.send_json(500, {"error": f"could not parse js/data.js: {e}"})
+            return
+        stack = load_undo_stack()
+        self.send_json(200, {
+            "posts": posts,
+            "undo": {
+                "count": len(stack),
+                "last_title": stack[-1]["title"] if stack else None,
+            },
+        })
+
+    # -- /api/edit --
+
+    def api_edit(self):
+        data = self.read_json_body()
+        if not data:
+            self.send_json(400, {"error": "invalid JSON body"})
+            return
+
+        slug = str(data.get("slug") or "").strip()
+        new_slug_raw = str(data.get("new_slug") or "").strip()
+        title = str(data.get("title") or "").strip()
+        description = str(data.get("description") or "")
+        related_raw = data.get("related") or []
+
+        if not slug:
+            self.send_json(400, {"error": "slug is required"})
+            return
+        if not title:
+            self.send_json(400, {"error": "title is required"})
+            return
+        if not description.strip():
+            self.send_json(400, {"error": "description is required"})
+            return
+
+        new_slug = slugify(new_slug_raw) if new_slug_raw else slug
+        if new_slug_raw and not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", new_slug):
+            self.send_json(400, {"error": "slug must contain only a-z, 0-9 and dashes"})
+            return
+
+        try:
+            content = read_data_js()
+            if post_index(content, slug) == -1:
+                self.send_json(404, {"error": f"no post with slug '{slug}'"})
+                return
+            new_content, final_slug, refs = apply_edit(
+                content, slug, title, description,
+                normalize_related(related_raw, exclude=new_slug),
+                new_slug=new_slug,
+            )
+            ok, detail = write_data_js(new_content)
+        except SlugTaken as e:
+            self.send_json(400, {"error": f"slug '{e}' is already used by another post"})
+            return
+        except ParseError as e:
+            self.send_json(500, {"error": f"could not parse js/data.js: {e}"})
+            return
+
+        if not ok:
+            self.send_json(500, {"error": f"edit produced invalid JS — not written: {detail}"})
+            return
+
+        msg = f"updated '{title}'"
+        if final_slug != slug:
+            msg += f" and renamed the slug to '{final_slug}'"
+            if refs:
+                msg += f" ({refs} related reference(s) updated)"
+        msg += " — push to repo to publish"
+
+        self.send_json(200, {
+            "ok": True,
+            "slug": final_slug,
+            "old_slug": slug,
+            "refs_updated": refs,
+            "url": f"post.html?slug={final_slug}",
+            "message": msg,
+        })
+
+    # -- /api/delete --
+
+    def api_delete(self):
+        data = self.read_json_body() or {}
+        slug = str(data.get("slug") or "").strip()
+        delete_images = bool(data.get("delete_images", True))
+
+        if not slug:
+            self.send_json(400, {"error": "slug is required"})
+            return
+
+        try:
+            content = read_data_js()
+            idx = post_index(content, slug)
+            if idx == -1:
+                self.send_json(404, {"error": f"no post with slug '{slug}'"})
+                return
+
+            posts = parse_posts(content)
+            target = posts[idx]
+            blocks = block_texts(content)
+            removed_block = blocks[idx]
+            del blocks[idx]
+            new_content = replace_array_body(content, blocks)
+
+            if len(parse_posts(new_content)) != len(posts) - 1:
+                self.send_json(500, {"error": "delete would not remove exactly one post — aborted"})
+                return
+
+            # which of this post's files are no longer referenced by anything?
+            rel_paths = []
+            if delete_images:
+                candidates = {target["cover"], *target["gallery"]}
+                still_used = set()
+                for p in parse_posts(new_content):
+                    still_used.update({p["cover"], *p["gallery"]})
+                rel_paths = sorted(candidates - still_used)
+
+            ok, detail = write_data_js(new_content)
+        except ParseError as e:
+            self.send_json(500, {"error": f"could not parse js/data.js: {e}"})
+            return
+
+        if not ok:
+            self.send_json(500, {"error": f"delete produced invalid JS — not written: {detail}"})
+            return
+
+        record = stash_delete(
+            slug, target["title"], removed_block, idx,
+            [os.path.join(ROOT, rel) for rel in rel_paths],
+        )
+        trashed = [f["original"].replace(ROOT + os.sep, "") for f in record["files"]]
+
+        msg = f"deleted '{target['title']}'"
+        if trashed:
+            msg += f" and stashed {len(trashed)} image file(s)"
+        msg += " — push to publish, or restore until then"
+
+        self.send_json(200, {
+            "ok": True,
+            "slug": slug,
+            "trashed": trashed,
+            "message": msg,
+        })
+
+    # -- /api/undo --
+
+    def api_undo(self):
+        record, err = undo_last_delete()
+        if err or record is None:
+            self.send_json(400, {"error": err or "nothing to undo"})
+            return
+        self.send_json(200, {
+            "ok": True,
+            "slug": record["slug"],
+            "title": record["title"],
+            "restored_files": [f["original"].replace(ROOT + os.sep, "")
+                               for f in record.get("files", [])],
+            "message": f"restored '{record['title']}'",
+        })
+
     # -- /api/push --
 
     def api_push(self):
@@ -641,8 +823,8 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
-        # 2. Stage only what uploads produce
-        code, add_out = run_git(["add", "js/data.js", "assets/"])
+        # 2. Stage data.js and assets — -A also stages deletions from /api/delete
+        code, add_out = run_git(["add", "-A", "js/data.js", "assets/"])
         if code != 0:
             self.send_json(500, {"error": "git add failed", "output": add_out})
             return
@@ -662,11 +844,13 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        clear_undo_history()
+
         self.send_json(200, {
             "ok": True,
             "pushed": True,
             "output": f"pending changes:\n{status}\n---\n{commit_out}\n---\n{push_out}",
-            "message": "pushed — GitHub Actions will rebuild & deploy the site (~1-2 min)",
+            "message": "pushed — deletions are now permanent; GitHub Actions will rebuild & deploy (~1-2 min)",
         })
 
 
@@ -678,6 +862,10 @@ def main():
     print(f"inspiration local server → http://localhost:{port}")
     print(f"  site:   http://localhost:{port}/")
     print(f"  upload: http://localhost:{port}/upload")
+    print(f"  manage: http://localhost:{port}/manage")
+    pending = len(load_undo_stack())
+    if pending:
+        print(f"  undo:   {pending} deleted post(s) can still be restored")
     print("  Ctrl-C to stop")
     try:
         server.serve_forever()
