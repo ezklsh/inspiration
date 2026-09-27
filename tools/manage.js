@@ -181,8 +181,8 @@ async function deletePost(row) {
     const post = posts.find(p => p.slug === slug);
     const label = post ? post.title : slug;
     const extra = deleteImagesChk.checked
-        ? '\n\nits image files will be stashed (restorable until you push).'
-        : '\n\nimage files will be left in place.';
+        ? '\n\nits image files will be moved to the trash (restorable until you push).'
+        : '\n\nits image files will be left in place.';
     if (!confirm(`delete "${label}"?${extra}\n\nrestore it with the "restore last deleted" button.`)) return;
 
     try {

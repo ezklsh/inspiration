@@ -777,7 +777,7 @@ class Handler(BaseHTTPRequestHandler):
 
         msg = f"deleted '{target['title']}'"
         if trashed:
-            msg += f" and stashed {len(trashed)} image file(s)"
+            msg += f" and moved {len(trashed)} image file(s) to the trash"
         msg += " — push to publish, or restore until then"
 
         self.send_json(200, {
@@ -809,18 +809,10 @@ class Handler(BaseHTTPRequestHandler):
         data = self.read_json_body() or {}
         message = str(data.get("message") or "add: new post").strip()
 
-        # 1. Show what's pending
-        code, status = run_git(["status", "--short"])
+        # 1. Show what's pending (only the paths this tool owns)
+        code, status = run_git(["status", "--short", "--", "js/data.js", "assets/"])
         if code != 0:
             self.send_json(500, {"error": "git status failed", "output": status})
-            return
-
-        if not status.strip():
-            self.send_json(200, {
-                "ok": True,
-                "pushed": False,
-                "output": "nothing to commit — working tree clean",
-            })
             return
 
         # 2. Stage data.js and assets — -A also stages deletions from /api/delete
@@ -829,27 +821,41 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(500, {"error": "git add failed", "output": add_out})
             return
 
-        # 3. Commit
-        code, commit_out = run_git(["commit", "-m", message])
-        if code != 0:
-            self.send_json(500, {"error": "git commit failed", "output": commit_out})
-            return
+        # 3. Commit only when THOSE paths actually staged something.
+        #    - `git diff --cached --quiet` exits 1 when there are staged changes
+        #    - scoped to our paths so unrelated staged files are never swept in
+        #    - a retry after a failed push finds nothing staged and skips the commit
+        code, _ = run_git(["diff", "--cached", "--quiet", "--", "js/data.js", "assets/"])
+        commit_out = ""
+        if code == 1:
+            code, commit_out = run_git(["commit", "-m", message])
+            if code != 0:
+                self.send_json(500, {"error": "git commit failed", "output": commit_out})
+                return
 
-        # 4. Push
+        # 4. Push — always, so a retry can publish a commit that failed to push earlier.
         code, push_out = run_git(["push"])
         if code != 0:
             self.send_json(500, {
                 "error": "git push failed — check auth (SSH key / credential helper)",
-                "output": f"{commit_out}\n---\n{push_out}",
+                "output": "\n---\n".join(p for p in (commit_out, push_out) if p),
             })
             return
 
+        # 5. Everything is published — pending deletions are now permanent.
         clear_undo_history()
+
+        parts = []
+        if status.strip():
+            parts.append(f"pending changes:\n{status}")
+        if commit_out:
+            parts.append(commit_out)
+        parts.append(push_out)
 
         self.send_json(200, {
             "ok": True,
             "pushed": True,
-            "output": f"pending changes:\n{status}\n---\n{commit_out}\n---\n{push_out}",
+            "output": "\n---\n".join(parts),
             "message": "pushed — deletions are now permanent; GitHub Actions will rebuild & deploy (~1-2 min)",
         })
 
