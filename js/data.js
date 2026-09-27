@@ -21,5 +21,13 @@ const POSTS = [
         cover: "assets/street-fighter-1790435757.jpg",
         gallery: ["assets/street-fighter-1790435757.jpg"],
         related: []
+    },
+    {
+        slug: "street-fighter-aplha-3",
+        title: "Street Fighter Aplha 3",
+        description: `Illustration by Edayan (Shinya Edaki）`,
+        cover: "assets/street-fighter-aplha-3-1790488401.webp",
+        gallery: ["assets/street-fighter-aplha-3-1790488401.webp"],
+        related: []
     }
 ];
