@@ -215,18 +215,21 @@ undoBtn.addEventListener('click', async () => {
             body: '{}'
         });
         const data = await res.json();
-        if (!res.ok) { showResult(resultBox, `error: ${data.error}`, true); return; }
+        if (!res.ok) {
+            showResult(resultBox, `error: ${data.error}`, true);
+            await loadPosts();          // also restores the correct button state
+            return;
+        }
         markDirty();
         let msg = data.message;
         if (data.restored_files && data.restored_files.length) {
             msg += '\n\nrestored files:\n' + data.restored_files.join('\n');
         }
         showResult(resultBox, msg);
-        await loadPosts();
+        await loadPosts();              // updateUndoButton disables it if the stack is empty
     } catch (e) {
         showResult(resultBox, 'error: ' + e.message, true);
-    } finally {
-        undoBtn.disabled = false;
+        undoBtn.disabled = false;       // server unreachable — keep it clickable
     }
 });
 
