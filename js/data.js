@@ -21,5 +21,13 @@ const POSTS = [
         cover: "assets/street-fighter-aplha-3-1790488401.webp",
         gallery: ["assets/street-fighter-aplha-3-1790488401.webp"],
         related: []
+    },
+    {
+        slug: "edward-elric",
+        title: "Edward Elric",
+        description: `Edward Elric from Fullmetal Alchemist: Brotherhood`,
+        cover: "assets/edward-elric-1791293540.gif",
+        gallery: ["assets/edward-elric-1791293540.gif"],
+        related: []
     }
 ];
