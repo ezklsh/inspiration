@@ -4,6 +4,28 @@
    dark mode, grid size controls
    ============================================ */
 
+// ---------- Data ----------
+
+let POSTS = [];
+
+async function loadPosts() {
+    const res = await fetch('js/posts.json', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`js/posts.json → HTTP ${res.status}`);
+    const data = await res.json();
+    if (!Array.isArray(data)) throw new Error('js/posts.json is not an array');
+    return data;
+}
+
+function showDataError(err) {
+    const target = document.getElementById('masonry-grid')
+        || document.getElementById('detail-gallery');
+    if (!target) return;
+    target.innerHTML = `<p class="data-error">could not load js/posts.json — ${err.message}.<br>
+        This site must be served over http. Run <code>python3 tools/upload_server.py</code>
+        and open <a href="http://localhost:8080/">http://localhost:8080/</a>.</p>`;
+    console.error('posts.json load failed:', err);
+}
+
 // ---------- Theme (Task 6) ----------
 
 const THEME_KEY = 'inspiration-theme';
@@ -158,8 +180,16 @@ function renderDetail() {
 initTheme();
 initGridSize();
 
-if (document.getElementById('masonry-grid')) {
-    renderGrid();
-} else if (document.getElementById('detail-title')) {
-    renderDetail();
-}
+(async () => {
+    try {
+        POSTS = await loadPosts();
+    } catch (err) {
+        showDataError(err);
+        return;
+    }
+    if (document.getElementById('masonry-grid')) {
+        renderGrid();
+    } else if (document.getElementById('detail-title')) {
+        renderDetail();
+    }
+})();

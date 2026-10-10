@@ -583,6 +583,9 @@ class Handler(BaseHTTPRequestHandler):
             data = f.read()
         self.send_response(200)
         self.send_header("Content-Type", ctype)
+        # Local preview must never serve a stale store after an upload.
+        if self.path.split("?")[0].endswith(".json"):
+            self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
