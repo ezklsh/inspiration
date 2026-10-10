@@ -7,7 +7,7 @@ Serves the static site AND provides the upload tool.
   GET  /upload      → upload page (tools/upload.html, gitignored)
   GET  /manage      → manage posts page (tools/manage.html, gitignored)
   GET  /api/posts   → list all posts as JSON (+ undo availability)
-  POST /api/upload  → save image + post locally (assets/, js/data.js)
+  POST /api/upload  → save image + post locally (assets/, js/posts.json)
   POST /api/edit    → update a post (title/description/related/slug)
   POST /api/delete  → remove a post (stashes it for undo)
   POST /api/undo    → restore the most recently deleted post
@@ -34,7 +34,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSETS_DIR = os.path.join(ROOT, "assets")
-DATA_JS = os.path.join(ROOT, "js", "data.js")
 POSTS_JSON = os.path.join(ROOT, "js", "posts.json")
 UPLOAD_PAGE = os.path.join(ROOT, "tools", "upload.html")
 
@@ -55,13 +54,11 @@ def slugify(title):
 
 
 def existing_slugs():
-    """Extract slugs already present in js/data.js."""
+    """Slugs already present in the store."""
     try:
-        with open(DATA_JS, encoding="utf-8") as f:
-            content = f.read()
-    except FileNotFoundError:
+        return {p["slug"] for p in read_posts()}
+    except (ParseError, KeyError):
         return set()
-    return set(re.findall(r'slug:\s*"([^"]+)"', content))
 
 
 def unique_slug(base):
@@ -75,17 +72,7 @@ def unique_slug(base):
     return f"{base}-{i}"
 
 
-def js_str(s):
-    """Escape a string for a double-quoted JS string literal."""
-    return s.replace("\\", "\\\\").replace('"', '\\"')
-
-
-def js_template(s):
-    """Escape text for a JS backtick template literal."""
-    return s.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
-
-
-# ---------- js/data.js reading ----------
+# ---------- errors ----------
 
 class ParseError(Exception):
     """js/data.js could not be understood. Callers must not write anything."""
@@ -153,228 +140,19 @@ def write_posts(posts, path=None):
     return True, "ok"
 
 
-POSTS_ARRAY_RE = re.compile(r"const\s+POSTS\s*=\s*\[")
-STR_RE = r'"((?:[^"\\]|\\.)*)"'
 TRASH_DIR = os.path.join(ROOT, ".dev", "trash")
-
-
-def _skip_string(content, i):
-    """`i` points at a quote or backtick. Return the index just past its close."""
-    quote = content[i]
-    i += 1
-    while i < len(content):
-        c = content[i]
-        if c == "\\":
-            i += 2
-            continue
-        if c == quote:
-            return i + 1
-        i += 1
-    raise ParseError("unterminated string or template literal")
-
-
-def array_bounds(content):
-    """Return (body_start, body_end): indices inside the `POSTS = [ ... ]` brackets."""
-    m = POSTS_ARRAY_RE.search(content)
-    if not m:
-        raise ParseError("could not find `const POSTS = [`")
-    i = m.end()  # just after the opening '['
-    depth = 0
-    while i < len(content):
-        c = content[i]
-        if c in "\"'`":
-            i = _skip_string(content, i)
-            continue
-        if c in "[{(":
-            depth += 1
-        elif c in "]})":
-            if c == "]" and depth == 0:
-                return m.end(), i
-            depth -= 1
-        i += 1
-    raise ParseError("could not find the closing `]` of the POSTS array")
-
-
-def post_block_spans(content):
-    """Return [(start, end), ...] — one span per top-level `{...}` object.
-
-    String literals are skipped, so braces and newlines inside descriptions are safe.
-    """
-    body_start, body_end = array_bounds(content)
-    spans = []
-    i = body_start
-    depth = 0
-    opened_at = None
-    while i < body_end:
-        c = content[i]
-        if c in "\"'`":
-            i = _skip_string(content, i)
-            continue
-        if c == "{":
-            if depth == 0:
-                # Include the leading indentation so rebuilding the array keeps
-                # the file's formatting byte-identical.
-                j = i
-                while j > body_start and content[j - 1] in " \t":
-                    j -= 1
-                opened_at = j
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0 and opened_at is not None:
-                spans.append((opened_at, i + 1))
-                opened_at = None
-        i += 1
-    if depth != 0:
-        raise ParseError("unbalanced braces in POSTS array")
-    return spans
-
-
-def _unescape_str(s):
-    return s.replace('\\"', '"').replace("\\\\", "\\")
-
-
-def _unescape_template(s):
-    return s.replace("\\`", "`").replace("\\${", "${").replace("\\\\", "\\")
-
-
-def parse_block(text):
-    """Extract post fields from one `{ ... }` block."""
-
-    def field(name, pattern=STR_RE):
-        # anchored at line start so a description mentioning e.g. "cover:" cannot match
-        m = re.search(rf"^[ \t]*{name}:\s*{pattern}", text, re.S | re.M)
-        if not m:
-            raise ParseError(f"missing or malformed field `{name}` in block: {text[:70]!r}...")
-        return m.group(1)
-
-    return {
-        "slug": _unescape_str(field("slug")),
-        "title": _unescape_str(field("title")),
-        "description": _unescape_template(field("description", r"`((?:\\.|[^`\\])*)`")),
-        "cover": _unescape_str(field("cover")),
-        "gallery": [_unescape_str(x) for x in re.findall(STR_RE, field("gallery", r"\[([^\]]*)\]"))],
-        "related": [_unescape_str(x) for x in re.findall(STR_RE, field("related", r"\[([^\]]*)\]"))],
-    }
-
-
-def parse_posts(content):
-    """Parse every post in js/data.js. Raises ParseError on anything unexpected."""
-    return [parse_block(content[s:e]) for s, e in post_block_spans(content)]
-
-
-def read_data_js(path=None):
-    path = path or DATA_JS
-    try:
-        with open(path, encoding="utf-8") as f:
-            return f.read()
-    except FileNotFoundError:
-        raise ParseError(f"{path} not found")
-
-
-# ---------- js/data.js writing ----------
-
-def render_post_block(post):
-    """Render one post as a canonical 4-space-indented block (no trailing comma)."""
-    gallery_inner = ", ".join(f'"{js_str(g)}"' for g in post["gallery"])
-    related_inner = ", ".join(f'"{js_str(r)}"' for r in post["related"])
-    return (
-        "    {\n"
-        f'        slug: "{js_str(post["slug"])}",\n'
-        f'        title: "{js_str(post["title"])}",\n'
-        f"        description: `{js_template(post['description'])}`,\n"
-        f'        cover: "{js_str(post["cover"])}",\n'
-        f"        gallery: [{gallery_inner}],\n"
-        f"        related: [{related_inner}]\n"
-        "    }"
-    )
-
-
-def block_texts(content):
-    """Current text of each post block, verbatim (formatting preserved)."""
-    return [content[s:e] for s, e in post_block_spans(content)]
-
-
-def replace_array_body(content, blocks):
-    """Rebuild js/data.js with `blocks` as the POSTS entries, joined by commas."""
-    body_start, body_end = array_bounds(content)
-    body = "\n" if not blocks else "\n" + ",\n".join(blocks) + "\n"
-    return content[:body_start] + body + content[body_end:]
-
-
-def post_index(content, slug):
-    """Index of the post with this slug, or -1."""
-    for i, (s, e) in enumerate(post_block_spans(content)):
-        m = re.search(r"^[ \t]*slug:\s*" + STR_RE, content[s:e], re.M)
-        if m and _unescape_str(m.group(1)) == slug:
-            return i
-    return -1
-
-
-def insert_block_at(content, index, block):
-    """Insert a previously removed block text at `index` (clamped)."""
-    blocks = block_texts(content)
-    idx = max(0, min(index, len(blocks)))
-    blocks.insert(idx, block)
-    return replace_array_body(content, blocks)
-
-
-def js_check_file(path):
-    """Return (ok, detail) for whether `path` parses as JavaScript."""
-    if shutil.which("node"):
-        proc = subprocess.run(
-            ["node", "--check", path],
-            capture_output=True, text=True,
-        )
-        return proc.returncode == 0, (proc.stderr or proc.stdout or "").strip()
-    text = open(path, encoding="utf-8").read()
-    try:
-        array_bounds(text)
-    except ParseError as e:
-        return False, str(e)
-    for open_c, close_c in (("{", "}"), ("[", "]"), ("(", ")")):
-        if text.count(open_c) != text.count(close_c):
-            return False, f"unbalanced {open_c}{close_c}"
-    return True, "rough balance check passed"
-
-
-def write_data_js(new_content, path=None):
-    """Validate `new_content` as JS, then atomically replace `path`.
-
-    Validation happens on a temp file BEFORE the real file is touched, so a bad
-    edit can never break the live site. Returns (ok, detail).
-    """
-    path = path or DATA_JS
-    # NOTE: the temp file must keep a .js extension — `node --check` refuses
-    # other extensions (ERR_UNKNOWN_FILE_EXTENSION).
-    tmp = path + ".tmp.js"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(new_content)
-        ok, detail = js_check_file(tmp)
-        if not ok:
-            os.remove(tmp)
-            return False, detail
-        os.replace(tmp, path)
-        return True, ""
-    except OSError as e:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        return False, str(e)
-
-
-def js_check_syntax():
-    """Kept for compatibility with existing callers."""
-    return js_check_file(DATA_JS)
 
 
 # ---------- post operations ----------
 
 def append_post(post):
-    """Append a post to js/data.js. Returns (ok, detail)."""
-    content = read_data_js()
-    blocks = block_texts(content) + [render_post_block(post)]
-    return write_data_js(replace_array_body(content, blocks))
+    """Append a post to the store. Returns (ok, detail)."""
+    try:
+        posts = read_posts()
+    except ParseError as e:
+        return False, f"could not read the store: {e}"
+    posts.append(canonical_post(post))
+    return write_posts(posts)
 
 
 def normalize_related(related_raw, exclude=None):
@@ -393,16 +171,14 @@ def normalize_related(related_raw, exclude=None):
     return out
 
 
-def apply_edit(content, slug, title, description, related, new_slug=None):
+def apply_edit(posts, slug, title, description, related, new_slug=None):
     """Edit a post's fields, optionally renaming its slug and fixing every
     `related` reference to the old slug.
 
-    Returns (new_content, final_slug, refs_updated).
+    Returns (new_posts, final_slug, refs_updated) where refs_updated is the list of posts
+    whose `related` was repointed.
     Raises ParseError if the post is missing; SlugTaken if the new slug is in use.
     """
-    posts = parse_posts(content)
-    blocks = block_texts(content)
-
     idx = next((i for i, p in enumerate(posts) if p["slug"] == slug), -1)
     if idx == -1:
         raise ParseError(f"no post with slug '{slug}'")
@@ -413,34 +189,32 @@ def apply_edit(content, slug, title, description, related, new_slug=None):
         if final_slug in taken:
             raise SlugTaken(final_slug)
 
-    blocks[idx] = render_post_block({
-        **posts[idx],
-        "slug": final_slug,
-        "title": title,
-        "description": description,
-        "related": [r for r in related if r != final_slug],
-    })
+    updated = [dict(p) for p in posts]
+    target = updated[idx]
+    target["slug"] = final_slug
+    target["title"] = title
+    target["description"] = description
+    target["related"] = [r for r in (related or []) if r != final_slug]
 
-    refs_updated = 0
+    refs_updated = []
     if final_slug != slug:
-        for i, p in enumerate(posts):
-            if i == idx or slug not in p["related"]:
+        for p in updated:
+            if p is target or slug not in (p.get("related") or []):
                 continue
-            blocks[i] = render_post_block(
-                {**p, "related": [final_slug if r == slug else r for r in p["related"]]}
-            )
-            refs_updated += 1
+            p["related"] = [final_slug if r == slug else r for r in p["related"]]
+            refs_updated.append(p["slug"])
 
-    return replace_array_body(content, blocks), final_slug, refs_updated
+    return [canonical_post(p) for p in updated], final_slug, refs_updated
 
 
 # ---------- delete stash / undo ----------
 
-def stash_delete(slug, title, block, index, abs_paths, trash_root=None, guard_root=None):
+def stash_delete(slug, title, post, index, abs_paths, trash_root=None, guard_root=None):
     """Move a deleted post's image files into the trash and persist an undo record.
 
     `abs_paths` are absolute file paths. Files are only moved when they live under
-    `guard_root` (default: assets/). Returns the record dict.
+    `guard_root` (default: assets/). `post` is the whole post object, so undo can re-insert
+    it without re-parsing anything. Returns the record dict.
     """
     trash_root = trash_root or TRASH_DIR
     guard_root = guard_root or ASSETS_DIR
@@ -459,7 +233,7 @@ def stash_delete(slug, title, block, index, abs_paths, trash_root=None, guard_ro
     record = {
         "slug": slug,
         "title": title,
-        "block": block,
+        "post": canonical_post(post),
         "index": index,
         "stamp": int(time.time()),
         "dir": dest,
@@ -489,29 +263,32 @@ def load_undo_stack(trash_root=None):
 
 
 def undo_last_delete(trash_root=None, data_path=None):
-    """Restore the most recently deleted post: entry first, then its image files.
+    """Restore the most recently deleted post: the store first, then its image files.
 
     Returns (record, error_message); exactly one is truthy.
     """
-    data_path = data_path or DATA_JS
+    data_path = data_path or POSTS_JSON
     stack = load_undo_stack(trash_root)
     if not stack:
         return None, "nothing to undo"
     record = stack[-1]
 
+    if "post" not in record:
+        return None, "this undo record predates the JSON store — restore it by hand"
+
     try:
-        content = read_data_js(data_path)
-        if post_index(content, record["slug"]) != -1:
+        posts = read_posts(data_path)
+        if any(p.get("slug") == record["slug"] for p in posts):
             return None, f"a post with slug '{record['slug']}' already exists"
-        ok, detail = write_data_js(
-            insert_block_at(content, record["index"], record["block"]), data_path
-        )
+        index = min(int(record.get("index", len(posts))), len(posts))
+        posts.insert(index, canonical_post(record["post"]))
+        ok, detail = write_posts(posts, data_path)
         if not ok:
             return None, f"could not restore: {detail}"
     except ParseError as e:
         return None, str(e)
 
-    # only after data.js is safely written, put the images back
+    # only after the store is safely written, put the images back
     for f in record.get("files", []):
         src, dst = f["trashed"], f["original"]
         if os.path.isfile(src):
@@ -693,7 +470,7 @@ class Handler(BaseHTTPRequestHandler):
         ok, detail = append_post(post)
         if not ok:
             os.remove(os.path.join(ASSETS_DIR, fname))  # undo the saved image
-            self.send_json(500, {"error": f"could not update js/data.js: {detail}"})
+            self.send_json(500, {"error": f"could not update the post store: {detail}"})
             return
 
         self.send_json(200, {
@@ -708,9 +485,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_posts(self):
         try:
-            posts = parse_posts(read_data_js())
+            posts = read_posts()
         except ParseError as e:
-            self.send_json(500, {"error": f"could not parse js/data.js: {e}"})
+            self.send_json(500, {"error": f"could not read the post store: {e}"})
             return
         stack = load_undo_stack()
         self.send_json(200, {
@@ -751,39 +528,45 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            content = read_data_js()
-            if post_index(content, slug) == -1:
-                self.send_json(404, {"error": f"no post with slug '{slug}'"})
-                return
-            new_content, final_slug, refs = apply_edit(
-                content, slug, title, description,
+            posts = read_posts()
+        except ParseError as e:
+            self.send_json(500, {"error": f"could not read the post store: {e}"})
+            return
+
+        if not any(p.get("slug") == slug for p in posts):
+            self.send_json(404, {"error": f"no post with slug '{slug}'"})
+            return
+
+        try:
+            new_posts, final_slug, refs = apply_edit(
+                posts, slug, title, description,
                 normalize_related(related_raw, exclude=new_slug),
                 new_slug=new_slug,
             )
-            ok, detail = write_data_js(new_content)
         except SlugTaken as e:
             self.send_json(400, {"error": f"slug '{e}' is already used by another post"})
             return
         except ParseError as e:
-            self.send_json(500, {"error": f"could not parse js/data.js: {e}"})
+            self.send_json(400, {"error": str(e)})
             return
 
+        ok, detail = write_posts(new_posts)
         if not ok:
-            self.send_json(500, {"error": f"edit produced invalid JS — not written: {detail}"})
+            self.send_json(500, {"error": f"edit could not be written: {detail}"})
             return
 
         msg = f"updated '{title}'"
         if final_slug != slug:
             msg += f" and renamed the slug to '{final_slug}'"
             if refs:
-                msg += f" ({refs} related reference(s) updated)"
+                msg += f" ({len(refs)} related reference(s) updated: {', '.join(refs)})"
         msg += " — push to repo to publish"
 
         self.send_json(200, {
             "ok": True,
             "slug": final_slug,
             "old_slug": slug,
-            "refs_updated": refs,
+            "refs_updated": len(refs),
             "url": f"post.html?slug={final_slug}",
             "message": msg,
         })
@@ -800,20 +583,16 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            content = read_data_js()
-            idx = post_index(content, slug)
+            posts = read_posts()
+            idx = next((i for i, p in enumerate(posts) if p.get("slug") == slug), -1)
             if idx == -1:
                 self.send_json(404, {"error": f"no post with slug '{slug}'"})
                 return
 
-            posts = parse_posts(content)
             target = posts[idx]
-            blocks = block_texts(content)
-            removed_block = blocks[idx]
-            del blocks[idx]
-            new_content = replace_array_body(content, blocks)
+            remaining = [p for i, p in enumerate(posts) if i != idx]
 
-            if len(parse_posts(new_content)) != len(posts) - 1:
+            if len(remaining) != len(posts) - 1:
                 self.send_json(500, {"error": "delete would not remove exactly one post — aborted"})
                 return
 
@@ -822,21 +601,21 @@ class Handler(BaseHTTPRequestHandler):
             if delete_images:
                 candidates = {target["cover"], *target["gallery"]}
                 still_used = set()
-                for p in parse_posts(new_content):
+                for p in remaining:
                     still_used.update({p["cover"], *p["gallery"]})
                 rel_paths = sorted(candidates - still_used)
 
-            ok, detail = write_data_js(new_content)
+            ok, detail = write_posts(remaining)
         except ParseError as e:
-            self.send_json(500, {"error": f"could not parse js/data.js: {e}"})
+            self.send_json(500, {"error": f"could not read the post store: {e}"})
             return
 
         if not ok:
-            self.send_json(500, {"error": f"delete produced invalid JS — not written: {detail}"})
+            self.send_json(500, {"error": f"delete could not be written: {detail}"})
             return
 
         record = stash_delete(
-            slug, target["title"], removed_block, idx,
+            slug, target["title"], target, idx,
             [os.path.join(ROOT, rel) for rel in rel_paths],
         )
         trashed = [f["original"].replace(ROOT + os.sep, "") for f in record["files"]]
@@ -876,13 +655,13 @@ class Handler(BaseHTTPRequestHandler):
         message = str(data.get("message") or "add: new post").strip()
 
         # 1. Show what's pending (only the paths this tool owns)
-        code, status = run_git(["status", "--short", "--", "js/data.js", "assets/"])
+        code, status = run_git(["status", "--short", "--", "js/posts.json", "assets/"])
         if code != 0:
             self.send_json(500, {"error": "git status failed", "output": status})
             return
 
-        # 2. Stage data.js and assets — -A also stages deletions from /api/delete
-        code, add_out = run_git(["add", "-A", "js/data.js", "assets/"])
+        # 2. Stage the store and assets — -A also stages deletions from /api/delete
+        code, add_out = run_git(["add", "-A", "js/posts.json", "assets/"])
         if code != 0:
             self.send_json(500, {"error": "git add failed", "output": add_out})
             return
@@ -891,7 +670,7 @@ class Handler(BaseHTTPRequestHandler):
         #    - `git diff --cached --quiet` exits 1 when there are staged changes
         #    - scoped to our paths so unrelated staged files are never swept in
         #    - a retry after a failed push finds nothing staged and skips the commit
-        code, _ = run_git(["diff", "--cached", "--quiet", "--", "js/data.js", "assets/"])
+        code, _ = run_git(["diff", "--cached", "--quiet", "--", "js/posts.json", "assets/"])
         commit_out = ""
         if code == 1:
             code, commit_out = run_git(["commit", "-m", message])

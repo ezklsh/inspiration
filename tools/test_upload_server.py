@@ -3,12 +3,14 @@
 
 Run:  cd ~/Documents/Projects/Websites/inspiration
       python3 -m unittest discover -s tools -p "test_*.py" -v
+
+The store is js/posts.json. Tests never assert a post count or a specific slug: the content
+is the owner's and changes as they publish, so live-content tests assert STRUCTURE only.
 """
 
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,179 +18,27 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import upload_server as srv  # noqa: E402
 
-HAS_NODE = shutil.which("node") is not None
-DATA_JS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "js", "data.js")
 
-
-def fixture():
-    """Two posts with nasty content: real newlines, escaped backtick,
-    escaped ${, double quotes in a title, and a full-width unicode paren."""
-    return (
-        "/* comment */\n"
-        "const POSTS = [\n"
-        "    {\n"
-        '        slug: "alpha",\n'
-        '        title: "Alpha One",\n'
-        "        description: `line one\nline two \\`tick\\` and \\${tpl} end`,\n"
-        '        cover: "assets/a.png",\n'
-        '        gallery: ["assets/a.png", "assets/a2.png"],\n'
-        '        related: ["beta"]\n'
-        "    },\n"
-        "    {\n"
-        '        slug: "beta",\n'
-        '        title: "Beta \\"quoted\\"",\n'
-        "        description: `plain`,\n"
-        '        cover: "assets/b.png",\n'
-        '        gallery: ["assets/b.png"],\n'
-        "        related: []\n"
-        "    }\n"
-        "];\n"
-    )
-
-
-def node_ok(text):
-    """Write text to a temp file and run node --check on it."""
-    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
-        f.write(text)
-        path = f.name
-    try:
-        proc = subprocess.run(["node", "--check", path], capture_output=True, text=True)
-        return proc.returncode == 0, (proc.stderr or "").strip()
-    finally:
-        os.remove(path)
-
-
-class TestParse(unittest.TestCase):
-    def test_parse_posts_basic(self):
-        posts = srv.parse_posts(fixture())
-        self.assertEqual(len(posts), 2)
-        a, b = posts
-        self.assertEqual(a["slug"], "alpha")
-        self.assertEqual(a["title"], "Alpha One")
-        self.assertEqual(a["cover"], "assets/a.png")
-        self.assertEqual(a["gallery"], ["assets/a.png", "assets/a2.png"])
-        self.assertEqual(a["related"], ["beta"])
-        self.assertIn("line one\nline two", a["description"])   # newline preserved
-        self.assertIn("`tick`", a["description"])               # escaped backtick unescaped
-        self.assertIn("${tpl}", a["description"])               # escaped ${ unescaped
-        self.assertEqual(b["title"], 'Beta "quoted"')           # escaped quotes unescaped
-        self.assertEqual(b["related"], [])
-
-    def test_parse_real_data_js(self):
-        # The content is the user's to change, so assert STRUCTURE only —
-        # never a specific post count or slug.
-        with open(DATA_JS, encoding="utf-8") as f:
-            raw = f.read()
-        posts = srv.parse_posts(raw)
-        self.assertIsInstance(posts, list)
-        for p in posts:
-            self.assertTrue(p["slug"])
-            self.assertTrue(p["title"])
-            self.assertTrue(p["cover"].startswith("assets/"))
-            self.assertIsInstance(p["gallery"], list)
-            self.assertIsInstance(p["related"], list)
-
-    def test_real_data_rewrite_is_byte_identical(self):
-        with open(DATA_JS, encoding="utf-8") as f:
-            raw = f.read()
-        self.assertEqual(srv.replace_array_body(raw, srv.block_texts(raw)), raw)
-
-    def test_real_data_survives_a_canonical_rewrite(self):
-        with open(DATA_JS, encoding="utf-8") as f:
-            raw = f.read()
-        posts = srv.parse_posts(raw)
-        rebuilt = ("const POSTS = [\n"
-                   + ",\n".join(srv.render_post_block(p) for p in posts)
-                   + "\n];\n")
-        self.assertEqual(srv.parse_posts(rebuilt), posts)
-        if HAS_NODE:
-            ok, detail = node_ok(rebuilt)
-            self.assertTrue(ok, detail)
-
-
-class TestMutations(unittest.TestCase):
-    def test_block_texts_and_index(self):
-        content = fixture()
-        self.assertEqual(len(srv.block_texts(content)), 2)
-        self.assertEqual(srv.post_index(content, "alpha"), 0)
-        self.assertEqual(srv.post_index(content, "beta"), 1)
-        self.assertEqual(srv.post_index(content, "nope"), -1)
-
-    def test_remove_each_post_stays_valid(self):
-        for slug in ("alpha", "beta"):
-            content = fixture()
-            idx = srv.post_index(content, slug)
-            blocks = srv.block_texts(content)
-            del blocks[idx]
-            new = srv.replace_array_body(content, blocks)
-            posts = srv.parse_posts(new)
-            self.assertNotIn(slug, [p["slug"] for p in posts])
-            self.assertEqual(len(posts), 1)
-            if HAS_NODE:
-                ok, detail = node_ok(new)
-                self.assertTrue(ok, detail)
-
-    def test_remove_all_posts_leaves_empty_array(self):
-        content = fixture()
-        new = srv.replace_array_body(content, [])
-        self.assertEqual(srv.parse_posts(new), [])
-        if HAS_NODE:
-            ok, detail = node_ok(new)
-            self.assertTrue(ok, detail)
-
-    def test_insert_appends_and_stays_valid(self):
-        content = fixture()
-        new_post = {"slug": "gamma", "title": "Gamma", "description": "third",
-                    "cover": "assets/g.png", "gallery": ["assets/g.png"], "related": ["alpha"]}
-        blocks = srv.block_texts(content) + [srv.render_post_block(new_post)]
-        new = srv.replace_array_body(content, blocks)
-        self.assertEqual([p["slug"] for p in srv.parse_posts(new)], ["alpha", "beta", "gamma"])
-        if HAS_NODE:
-            ok, detail = node_ok(new)
-            self.assertTrue(ok, detail)
-
-    def test_insert_block_at_restores_original_position(self):
-        content = fixture()
-        blocks = srv.block_texts(content)
-        removed = blocks.pop(0)
-        without = srv.replace_array_body(content, blocks)
-        restored = srv.insert_block_at(without, 0, removed)
-        self.assertEqual(restored, content)          # byte-identical round trip
-        restored_end = srv.insert_block_at(without, 99, removed)
-        self.assertEqual([p["slug"] for p in srv.parse_posts(restored_end)], ["beta", "alpha"])
-
-    def test_replace_keeps_other_blocks_byte_identical(self):
-        content = fixture()
-        blocks = srv.block_texts(content)
-        alpha_before = blocks[0]
-        idx = srv.post_index(content, "beta")
-        target = srv.parse_posts(content)[idx]
-        blocks[idx] = srv.render_post_block({**target, "title": "Beta Renamed",
-                                            "description": "new\ntext"})
-        new = srv.replace_array_body(content, blocks)
-        posts = {p["slug"]: p for p in srv.parse_posts(new)}
-        self.assertEqual(srv.block_texts(new)[0], alpha_before)        # untouched
-        self.assertEqual(posts["beta"]["title"], "Beta Renamed")
-        self.assertEqual(posts["beta"]["description"], "new\ntext")
-        self.assertEqual(posts["beta"]["cover"], "assets/b.png")       # preserved
-        self.assertEqual(posts["beta"]["gallery"], ["assets/b.png"])   # preserved
-        if HAS_NODE:
-            ok, detail = node_ok(new)
-            self.assertTrue(ok, detail)
-
-    def test_render_round_trips_escapes(self):
-        post = {"slug": "s", "title": 'Q "quoted"', "description": "a\nb `tick` ${x} \\ end",
-                "cover": "assets/x.png", "gallery": ["assets/x.png"], "related": []}
-        content = "const POSTS = [\n" + srv.render_post_block(post) + "\n];\n"
-        self.assertEqual(srv.parse_posts(content), [post])
-        if HAS_NODE:
-            ok, detail = node_ok(content)
-            self.assertTrue(ok, detail)
+def records():
+    """Two post objects in the shape the store holds."""
+    return [
+        {"slug": "alpha", "title": "Alpha One", "description": "d",
+         "cover": "assets/a.png", "gallery": ["assets/a.png", "assets/a2.png"],
+         "related": ["beta"]},
+        {"slug": "beta", "title": 'Beta "quoted"', "description": "plain",
+         "cover": "assets/b.png", "gallery": ["assets/b.png"], "related": []},
+    ]
 
 
 class TestNormalizeRelated(unittest.TestCase):
-    def test_filters_unknown_drops_self_and_dedupes(self):
+    def setUp(self):
+        self._real = srv.existing_slugs
         srv.existing_slugs = lambda: {"alpha", "beta"}
+
+    def tearDown(self):
+        srv.existing_slugs = self._real
+
+    def test_filters_unknown_drops_self_and_dedupes(self):
         self.assertEqual(srv.normalize_related("beta, nope, beta", exclude="alpha"), ["beta"])
         self.assertEqual(srv.normalize_related(["beta", "beta"], exclude="beta"), [])
         self.assertEqual(srv.normalize_related("", exclude="alpha"), [])
@@ -196,37 +46,45 @@ class TestNormalizeRelated(unittest.TestCase):
 
 class TestApplyEdit(unittest.TestCase):
     def test_edit_fields_only(self):
-        new, final_slug, refs = srv.apply_edit(fixture(), "alpha", "New Title", "new desc", ["beta"])
+        new, final_slug, refs = srv.apply_edit(records(), "alpha", "New Title", "new desc",
+                                               ["beta"])
         self.assertEqual(final_slug, "alpha")
-        self.assertEqual(refs, 0)
-        posts = {p["slug"]: p for p in srv.parse_posts(new)}
-        self.assertEqual(posts["alpha"]["title"], "New Title")
-        self.assertEqual(posts["alpha"]["cover"], "assets/a.png")        # preserved
-        self.assertEqual(posts["alpha"]["gallery"], ["assets/a.png", "assets/a2.png"])
-        if HAS_NODE:
-            ok, detail = node_ok(new)
-            self.assertTrue(ok, detail)
+        self.assertEqual(refs, [])
+        got = {p["slug"]: p for p in new}
+        self.assertEqual(got["alpha"]["title"], "New Title")
+        self.assertEqual(got["alpha"]["description"], "new desc")
+        self.assertEqual(got["alpha"]["related"], ["beta"])
+        self.assertEqual(got["alpha"]["cover"], "assets/a.png")            # preserved
+        self.assertEqual(got["alpha"]["gallery"], ["assets/a.png", "assets/a2.png"])
+        self.assertEqual(list(got["alpha"]), list(srv.POST_FIELDS))        # canonical order
 
     def test_rename_updates_related_references(self):
         # alpha's related is ["beta"], so renaming beta must fix alpha
-        new, final_slug, refs = srv.apply_edit(fixture(), "beta", "Beta2", "d", [], new_slug="beta-two")
+        new, final_slug, refs = srv.apply_edit(records(), "beta", "Beta2", "d", [],
+                                               new_slug="beta-two")
         self.assertEqual(final_slug, "beta-two")
-        posts = {p["slug"]: p for p in srv.parse_posts(new)}
-        self.assertNotIn("beta", posts)
-        self.assertEqual(posts["beta-two"]["title"], "Beta2")
-        self.assertEqual(posts["alpha"]["related"], ["beta-two"])        # reference fixed
-        self.assertEqual(refs, 1)
-        if HAS_NODE:
-            ok, detail = node_ok(new)
-            self.assertTrue(ok, detail)
+        got = {p["slug"]: p for p in new}
+        self.assertNotIn("beta", got)
+        self.assertEqual(got["beta-two"]["title"], "Beta2")
+        self.assertEqual(got["alpha"]["related"], ["beta-two"])            # reference fixed
+        self.assertEqual(refs, ["alpha"])
+
+    def test_self_reference_is_dropped(self):
+        new, _, _ = srv.apply_edit(records(), "alpha", "t", "d", ["alpha", "beta"])
+        self.assertEqual({p["slug"]: p for p in new}["alpha"]["related"], ["beta"])
 
     def test_rename_to_existing_slug_is_rejected(self):
         with self.assertRaises(srv.SlugTaken):
-            srv.apply_edit(fixture(), "alpha", "t", "d", [], new_slug="beta")
+            srv.apply_edit(records(), "alpha", "t", "d", [], new_slug="beta")
 
     def test_missing_post_raises(self):
         with self.assertRaises(srv.ParseError):
-            srv.apply_edit(fixture(), "nope", "t", "d", [])
+            srv.apply_edit(records(), "nope", "t", "d", [])
+
+    def test_input_records_are_not_mutated(self):
+        before = records()
+        srv.apply_edit(before, "alpha", "New", "d", [])
+        self.assertEqual(before, records())
 
 
 class TestStashUndo(unittest.TestCase):
@@ -239,14 +97,23 @@ class TestStashUndo(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_stash_moves_files_and_writes_record(self):
-        img = os.path.join(self.assets, "x.png")
-        with open(img, "w") as f:
+    def image(self, name="x.png"):
+        path = os.path.join(self.assets, name)
+        with open(path, "w") as f:
             f.write("data")
-        rec = srv.stash_delete("gamma", "Gamma", "    { }", 1, [img],
+        return path
+
+    def test_stash_moves_files_and_stores_the_post_object(self):
+        img = self.image()
+        post = {"slug": "gamma", "title": "Gamma", "description": "d",
+                "cover": "assets/x.png", "gallery": ["assets/x.png"], "related": []}
+        rec = srv.stash_delete("gamma", "Gamma", post, 1, [img],
                                trash_root=self.trash, guard_root=self.assets)
-        self.assertFalse(os.path.exists(img))                      # moved out of assets
+        self.assertFalse(os.path.exists(img))                       # moved out of assets
         self.assertTrue(os.path.isfile(rec["files"][0]["trashed"]))
+        self.assertNotIn("block", rec)                              # no JS text any more
+        self.assertEqual(rec["post"]["slug"], "gamma")
+        self.assertEqual(list(rec["post"]), list(srv.POST_FIELDS))
         stack = srv.load_undo_stack(self.trash)
         self.assertEqual(len(stack), 1)
         self.assertEqual(stack[0]["slug"], "gamma")
@@ -255,42 +122,45 @@ class TestStashUndo(unittest.TestCase):
         outside = os.path.join(self.tmp, "outside.png")
         with open(outside, "w") as f:
             f.write("data")
-        rec = srv.stash_delete("gamma", "Gamma", "    { }", 0, [outside],
+        rec = srv.stash_delete("gamma", "Gamma", {"slug": "gamma"}, 0, [outside],
                                trash_root=self.trash, guard_root=self.assets)
         self.assertEqual(rec["files"], [])
         self.assertTrue(os.path.isfile(outside))
 
-    def test_full_delete_then_undo_restores_data_js_and_image(self):
-        # work on a temp copy of the real data.js
-        data = os.path.join(self.tmp, "data.js")
-        shutil.copy(DATA_JS, data)
-        original = open(data, encoding="utf-8").read()
+    def test_full_delete_then_undo_restores_the_store_and_image(self):
+        store = os.path.join(self.tmp, "posts.json")
+        shutil.copy(srv.POSTS_JSON, store)                  # a copy of the owner's content
+        original = open(store, encoding="utf-8").read()
 
-        img = os.path.join(self.assets, "cover.webp")
-        with open(img, "w") as f:
-            f.write("img")
+        posts = srv.read_posts(store)
+        if not posts:
+            self.skipTest("the live store is empty")
+        first, idx = posts[0], 0
 
-        content = srv.read_data_js(data)
-        first = srv.parse_posts(content)[0]      # any post — content is the user's
-        slug = first["slug"]
-        idx = srv.post_index(content, slug)
-        blocks = srv.block_texts(content)
-        removed_block = blocks[idx]
-        del blocks[idx]
-        ok, detail = srv.write_data_js(srv.replace_array_body(content, blocks), data)
+        img = self.image("cover.webp")
+        ok, detail = srv.write_posts(posts[1:], store)
         self.assertTrue(ok, detail)
-        self.assertNotIn(slug,
-                         [p["slug"] for p in srv.parse_posts(srv.read_data_js(data))])
+        self.assertNotIn(first["slug"], [p["slug"] for p in srv.read_posts(store)])
 
-        srv.stash_delete(slug, first["title"], removed_block, idx, [img],
+        srv.stash_delete(first["slug"], first["title"], first, idx, [img],
                          trash_root=self.trash, guard_root=self.assets)
 
-        rec, err = srv.undo_last_delete(trash_root=self.trash, data_path=data)
+        rec, err = srv.undo_last_delete(trash_root=self.trash, data_path=store)
         self.assertEqual(err, "")
-        self.assertEqual(rec["slug"], slug)
-        self.assertEqual(open(data, encoding="utf-8").read(), original)   # byte-identical
-        self.assertTrue(os.path.isfile(img))                              # image back
+        self.assertEqual(rec["slug"], first["slug"])
+        self.assertEqual(open(store, encoding="utf-8").read(), original)   # byte-identical
+        self.assertTrue(os.path.isfile(img))                               # image back
         self.assertEqual(srv.load_undo_stack(self.trash), [])
+
+    def test_undo_refuses_a_pre_migration_record(self):
+        os.makedirs(os.path.join(self.trash, "1-old"), exist_ok=True)
+        with open(os.path.join(self.trash, "1-old", "record.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"slug": "old", "title": "Old", "block": "    { }",
+                       "index": 0, "files": []}, f)
+        rec, err = srv.undo_last_delete(trash_root=self.trash)
+        self.assertIsNone(rec)
+        self.assertIn("predates", err)
 
     def test_undo_with_empty_stack_errors(self):
         rec, err = srv.undo_last_delete(trash_root=self.trash)
@@ -298,7 +168,7 @@ class TestStashUndo(unittest.TestCase):
         self.assertEqual(err, "nothing to undo")
 
 
-# ---------- the js/posts.json store (Phase A of the JSON migration) ----------
+# ---------- the store itself ----------
 
 class TestCanonicalPost(unittest.TestCase):
     def test_canonical_field_order(self):
@@ -396,6 +266,35 @@ class TestWritePosts(unittest.TestCase):
     def test_no_temp_file_is_left_behind(self):
         srv.write_posts([{"slug": "a"}], self.path)
         self.assertFalse(os.path.exists(self.path + ".tmp"))
+
+
+class TestTheRealStore(unittest.TestCase):
+    """The owner's live content: STRUCTURE only, never a count or a specific slug."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.copy = os.path.join(self.tmp, "posts.json")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_store_has_the_expected_shape(self):
+        posts = srv.read_posts(srv.POSTS_JSON)
+        self.assertIsInstance(posts, list)
+        for p in posts:
+            self.assertTrue(p["slug"])
+            self.assertTrue(p["title"])
+            self.assertTrue(p["cover"].startswith("assets/"))
+            self.assertIsInstance(p["gallery"], list)
+            self.assertIsInstance(p["related"], list)
+            self.assertEqual(list(p), list(srv.POST_FIELDS))     # canonical order on disk
+
+    def test_real_store_round_trips_byte_identically(self):
+        shutil.copy(srv.POSTS_JSON, self.copy)
+        before = open(self.copy, encoding="utf-8").read()
+        ok, detail = srv.write_posts(srv.read_posts(self.copy), self.copy)
+        self.assertTrue(ok, detail)
+        self.assertEqual(open(self.copy, encoding="utf-8").read(), before)
 
 
 if __name__ == "__main__":
