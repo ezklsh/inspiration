@@ -75,7 +75,7 @@ def unique_slug(base):
 # ---------- errors ----------
 
 class ParseError(Exception):
-    """js/data.js could not be understood. Callers must not write anything."""
+    """The post store could not be understood. Callers must not write anything."""
 
 
 class SlugTaken(ParseError):
