@@ -298,5 +298,105 @@ class TestStashUndo(unittest.TestCase):
         self.assertEqual(err, "nothing to undo")
 
 
+# ---------- the js/posts.json store (Phase A of the JSON migration) ----------
+
+class TestCanonicalPost(unittest.TestCase):
+    def test_canonical_field_order(self):
+        post = {"related": [], "cover": "c.webp", "slug": "s", "title": "t",
+                "description": "d", "gallery": ["g.webp"]}
+        self.assertEqual(list(srv.canonical_post(post)),
+                         ["slug", "title", "description", "cover", "gallery", "related"])
+
+    def test_unknown_keys_are_preserved_last(self):
+        out = srv.canonical_post({"slug": "s", "title": "t", "color": "#fff"})
+        self.assertEqual(list(out), ["slug", "title", "color"])
+        self.assertEqual(out["color"], "#fff")
+
+
+class TestReadPosts(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmp, "posts.json")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write(self, text):
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return self.path
+
+    def test_reads_a_list(self):
+        p = self.write('[{"slug": "a", "title": "A"}]')
+        self.assertEqual([q["slug"] for q in srv.read_posts(p)], ["a"])
+
+    def test_missing_file_raises_parse_error(self):
+        with self.assertRaises(srv.ParseError):
+            srv.read_posts(os.path.join(self.tmp, "nope.json"))
+
+    def test_invalid_json_raises_parse_error(self):
+        p = self.write('[{"slug": "a"},]')          # trailing comma is not JSON
+        with self.assertRaises(srv.ParseError):
+            srv.read_posts(p)
+
+    def test_non_array_raises_parse_error(self):
+        p = self.write('{"slug": "a"}')
+        with self.assertRaises(srv.ParseError):
+            srv.read_posts(p)
+
+    def test_entry_without_slug_raises_parse_error(self):
+        p = self.write('[{"title": "no slug"}]')
+        with self.assertRaises(srv.ParseError):
+            srv.read_posts(p)
+
+    def test_unicode_is_preserved(self):
+        p = self.write('[{"slug": "a", "description": "\uff08Shinya Edaki\uff09"}]')
+        self.assertEqual(srv.read_posts(p)[0]["description"], "\uff08Shinya Edaki\uff09")
+
+
+class TestWritePosts(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmp, "posts.json")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def read(self):
+        with open(self.path, encoding="utf-8") as f:
+            return f.read()
+
+    def test_writes_pretty_json_with_trailing_newline(self):
+        ok, detail = srv.write_posts([{"slug": "a", "title": "A"}], self.path)
+        self.assertTrue(ok, detail)
+        raw = self.read()
+        self.assertTrue(raw.endswith("]\n"))
+        self.assertIn('\n  {\n    "slug": "a"', raw)
+
+    def test_round_trip_is_byte_identical(self):
+        srv.write_posts([{"slug": "a", "title": "A", "description": "x\ny"}], self.path)
+        first = self.read()
+        srv.write_posts(srv.read_posts(self.path), self.path)
+        self.assertEqual(first, self.read())
+
+    def test_unicode_stays_literal(self):
+        srv.write_posts([{"slug": "a", "description": "\uff08Edaki\uff09"}], self.path)
+        raw = self.read()
+        self.assertIn("\uff08Edaki\uff09", raw)
+        self.assertNotIn("\\u", raw)
+
+    def test_unserializable_input_leaves_file_untouched(self):
+        srv.write_posts([{"slug": "a"}], self.path)
+        before = self.read()
+        ok, detail = srv.write_posts([{"slug": "b", "bad": {1, 2}}], self.path)  # a set
+        self.assertFalse(ok)
+        self.assertTrue(detail)
+        self.assertEqual(self.read(), before)
+
+    def test_no_temp_file_is_left_behind(self):
+        srv.write_posts([{"slug": "a"}], self.path)
+        self.assertFalse(os.path.exists(self.path + ".tmp"))
+
+
 if __name__ == "__main__":
     unittest.main()

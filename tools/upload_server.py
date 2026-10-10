@@ -35,10 +35,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSETS_DIR = os.path.join(ROOT, "assets")
 DATA_JS = os.path.join(ROOT, "js", "data.js")
+POSTS_JSON = os.path.join(ROOT, "js", "posts.json")
 UPLOAD_PAGE = os.path.join(ROOT, "tools", "upload.html")
 
 ALLOWED_IMAGE_TYPES = {"png": ".png", "jpeg": ".jpg", "webp": ".webp", "gif": ".gif"}
 MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10MB decoded
+
+# Canonical field order for a post record. This is what makes read -> write byte-stable,
+# so git diffs only ever show real content changes.
+POST_FIELDS = ("slug", "title", "description", "cover", "gallery", "related")
 
 
 # ---------- helpers ----------
@@ -88,6 +93,64 @@ class ParseError(Exception):
 
 class SlugTaken(ParseError):
     """An edit tried to rename a post to a slug another post already uses."""
+
+
+# ---------- js/posts.json store ----------
+
+def canonical_post(post):
+    """Return `post` with the known fields in canonical order; unknown keys kept, last."""
+    out = {k: post[k] for k in POST_FIELDS if k in post}
+    for k in post:
+        if k not in out:
+            out[k] = post[k]
+    return out
+
+
+def read_posts(path=None):
+    """Read js/posts.json. Raises ParseError on anything unexpected.
+
+    Callers must treat ParseError as "do not write anything".
+    """
+    path = path or POSTS_JSON
+    name = os.path.basename(path)
+    if not os.path.exists(path):
+        raise ParseError(f"{name} not found")
+    try:
+        with open(path, encoding="utf-8") as f:
+            posts = json.load(f)
+    except ValueError as e:
+        raise ParseError(f"{name} is not valid JSON: {e}")
+    if not isinstance(posts, list):
+        raise ParseError(f"{name} must contain a JSON array")
+    for i, post in enumerate(posts):
+        if not isinstance(post, dict) or not post.get("slug"):
+            raise ParseError(f"{name}: entry {i} is not a post object with a slug")
+    return [canonical_post(p) for p in posts]
+
+
+def write_posts(posts, path=None):
+    """Write posts to the JSON store atomically. Returns (ok, detail).
+
+    Validation is a round-trip through json.load on the temp file: if what we wrote does
+    not read back as the same records, the temp file is removed and the real file is never
+    touched. json.dumps cannot emit malformed JSON, so this replaces `node --check`.
+    """
+    path = path or POSTS_JSON
+    records = [canonical_post(p) for p in posts]
+    tmp = path + ".tmp"
+    try:
+        payload = json.dumps(records, indent=2, ensure_ascii=False) + "\n"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(payload)
+        with open(tmp, encoding="utf-8") as f:
+            if json.load(f) != records:
+                raise ValueError("round-trip mismatch")
+        os.replace(tmp, path)
+    except (OSError, TypeError, ValueError) as e:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return False, str(e)
+    return True, "ok"
 
 
 POSTS_ARRAY_RE = re.compile(r"const\s+POSTS\s*=\s*\[")
