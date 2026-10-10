@@ -2,8 +2,8 @@
 tools/upload.html
 tools/manage.html
 
-# temp file written by atomic data.js writes (must keep a .js extension)
-js/data.js.tmp.js
+# temp file written by atomic posts.json writes
+js/posts.json.tmp
 
 # python
 __pycache__/
